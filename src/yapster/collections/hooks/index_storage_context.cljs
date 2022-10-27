@@ -1,8 +1,9 @@
-(ns yapster.collections.hooks.storage-context
+(ns yapster.collections.hooks.index-storage-context
   (:require
    [lambdaisland.glogi :as log]
    [oops.core :refer [oget]]
    [promesa.core :as p]
+   [yapster.collections :as-alias coll]
    [yapster.collections.keys :as keys]
    [yapster.collections.context :as coll.ctx]
    [yapster.collections.context.util.time :as util.t]
@@ -10,12 +11,13 @@
    [yapster.collections.objects :as coll.objs]
    [yapster.collections.indexes :as coll.idxs]
    [yapster.collections.hooks.react-query :as rq]
-   [yapster.collections.hooks.fetch :as hooks.fetch]))
+   [yapster.collections.hooks.index-api :as hooks.index-api]))
 
 (defn refetch-page*
   "fetch a page of records from the API and integrate the results
    into the local store"
-  [query-client
+  [{query-client ::coll/query-client
+    :as _react-ctx}
    query-key
    ctx
    {coll-name ::coll.md/name
@@ -55,7 +57,7 @@
 (defn load-maybe-refetch-collection-page*
   "load a page from the local store, refresh from the API if
    necessary"
-  [query-client
+  [react-ctx
    query-key
    ctx
    {coll-name ::coll.md/name
@@ -143,7 +145,7 @@
 
     (when refetch?
       (refetch-page*
-       query-client
+       react-ctx
        query-key
        ctx
        coll
@@ -162,9 +164,8 @@
        idx-objs))))
 
 (defn load-start-collection-page
-  [query-client
+  [react-ctx
    query-key
-   auth-info
    ctx
    {coll-name ::coll.md/name
     :as coll}
@@ -180,9 +181,8 @@
                             :after key-data))
 
         fetch-page-fn (fn []
-                        (hooks.fetch/observe-fetch-start-collection-page
-                         query-client
-                         auth-info
+                        (hooks.index-api/observe-fetch-start-collection-page
+                         react-ctx
                          coll
                          key-alias
                          key-data
@@ -195,7 +195,7 @@
                 :query-opts query-opts})
 
     (load-maybe-refetch-collection-page*
-     query-client
+     react-ctx
      query-key
      ctx
      coll
@@ -206,9 +206,8 @@
 (defn load-refetch-start-collection-page
   "like load-start-collection-page, but forces a refetch of
    the first page"
-  [query-client
+  [react-ctx
    query-key
-   auth-info
    ctx
    {coll-name ::coll.md/name
     :as coll}
@@ -229,9 +228,8 @@
                             :after key-data))
 
         fetch-page-fn (fn []
-                        (hooks.fetch/observe-fetch-start-collection-page
-                         query-client
-                         auth-info
+                        (hooks.index-api/observe-fetch-start-collection-page
+                         react-ctx
                          coll
                          key-alias
                          key-data
@@ -244,7 +242,7 @@
                 :query-opts query-opts})
 
     (load-maybe-refetch-collection-page*
-     query-client
+     react-ctx
      query-key
      ctx
      coll
@@ -253,9 +251,8 @@
      fetch-page-fn)))
 
 (defn load-next-collection-page
-  [query-client
+  [react-ctx
    query-key
-   auth-info
    ctx
    {coll-name ::coll.md/name
     :as coll}
@@ -278,9 +275,8 @@
                       :after key-value)
 
           fetch-page-fn (fn []
-                          (hooks.fetch/observe-fetch-next-collection-page
-                           query-client
-                           auth-info
+                          (hooks.index-api/observe-fetch-next-collection-page
+                           react-ctx
                            coll
                            key-alias
                            key-data
@@ -295,7 +291,7 @@
                         :query-opts query-opts})]
 
     (load-maybe-refetch-collection-page*
-     query-client
+     react-ctx
      query-key
      ctx
      coll
@@ -304,9 +300,8 @@
      fetch-page-fn)))
 
 (defn load-previous-collection-page
-  [query-client
+  [react-ctx
    query-key
-   auth-info
    ctx
    {coll-name ::coll.md/name
     :as coll}
@@ -322,9 +317,8 @@
                     :before key-value)
 
         fetch-page-fn (fn []
-                        (hooks.fetch/observe-fetch-previous-collection-page
-                         query-client
-                         auth-info
+                        (hooks.index-api/observe-fetch-previous-collection-page
+                         react-ctx
                          coll
                          key-alias
                          key-data
@@ -339,7 +333,7 @@
                 :query-opts query-opts})
 
     (load-maybe-refetch-collection-page*
-     query-client
+     react-ctx
      query-key
      ctx
      coll
@@ -352,9 +346,9 @@
    collection's local storage
 
    returns: Promise<[object*]>"
-  [query-client
-   auth-info
-   db-name
+  [{db-name ::coll/db-name
+    query-client ::coll/query-client
+    :as react-ctx}
    {coll-name ::coll.md/name
     :as _coll}
    key-alias
@@ -397,9 +391,8 @@
     (p/let [page (condp = page-dir
                    ;; just like previous, but force an API fetch
                    "start" (load-previous-collection-page
-                            query-client
+                            react-ctx
                             query-key
-                            auth-info
                             ctx
                             coll
                             key-alias
@@ -408,9 +401,8 @@
                             (first current-page))
 
                    "previous" (load-previous-collection-page
-                               query-client
+                               react-ctx
                                query-key
-                               auth-info
                                ctx
                                coll
                                key-alias
@@ -419,9 +411,8 @@
                                (first current-page))
 
                    "next" (load-next-collection-page
-                           query-client
+                           react-ctx
                            query-key
-                           auth-info
                            ctx
                            coll
                            key-alias
@@ -431,9 +422,8 @@
 
                    ;; just like next, but force an API fetch
                    "end" (load-next-collection-page
-                          query-client
+                          react-ctx
                           query-key
-                          auth-info
                           ctx
                           coll
                           key-alias
@@ -442,16 +432,15 @@
                           (last current-page))
 
                    (load-start-collection-page
-                    query-client
+                    react-ctx
                     query-key
-                    auth-info
                     ctx
                     coll
                     key-alias
                     key-data
                     query-opts))]
 
-      ;; update the query-cache for each objet on the page
+      ;; update the query-cache for each object on the page
       (doseq [obj page]
         (rq/write-collection-object-cache query-client coll obj))
 
@@ -464,7 +453,8 @@
 
 
 (defn load-collection-object-query
-  [db-name
+  [{db-name ::coll/db-name
+    :as _react-ctx}
    coll-name
    obj-id]
 

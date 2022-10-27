@@ -55,7 +55,8 @@
 
 (def CollectionIndexApiSpec
   [:map
-   [:yapster.collection.metadata.api/path-template :string]
+   [:yapster.collection.metadata.api/handler {:optional true} :keyword]
+   [:yapster.collection.metadata.api/start-page-path-template :string]
    [:yapster.collection.metadata.api/next-page-path-template :string]
    [:yapster.collection.metadata.api/previous-page-path-template :string]
    [:yapster.collection.metadata.api/response-value-path :string]])
@@ -105,3 +106,15 @@
     [:yapster.collections.context/impl [:= :yapster.collections.context/sqlite]]
     [:yapster.collections.context.sqlite/db-name :string]
     [:yapster.collections.context.sqlite/db some?]]))
+
+(def CollectionsReactContext
+  "react context data for collections, to
+   be provided with:
+   yapster.collections.react-context/collections-context-provider"
+
+  [:map
+   [:yapster.collections/db-name :string]
+   [:yapster.collections/query-client some?]
+   [:yapster.collections/api-origin {:optional true} :string]
+   [:yapster.collections/api-data {:optional true} [:map]]
+   [:yapster.collections/api-headers {:optional true} [:map]]])

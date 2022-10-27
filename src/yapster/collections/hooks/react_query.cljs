@@ -84,21 +84,26 @@
    "invalidateQueries"
    (clj->js query-key)))
 
-(defn observe-query
-  "observe a react-query, avoiding hooks ...
+(defn observe-uncached-query
+  "observe an uncached react-query, avoiding hooks ...
 
-   do this so that we can
+   we do this to get react-query benefits on top
+   of a normal promise
+    - network status sensitivity
+    - retry
+
+   we also do this so that we can
    trigger a query-invlidation from
    inside a query function, and have it
-   run after the query function - because
-   there is borkage if query-invalidation
-   is run inside the query function
+   run after the query function (on-success)
+   - because there is borkage if query-invalidation
+   is run inside a query function
 
    returns Promise<rq-result>
      - calls any on-success fn with the query data
      - calls any on-error fn with the error"
   ([query-client query-key query-fn]
-   (observe-query query-client query-key query-fn {}))
+   (observe-uncached-query query-client query-key query-fn {}))
   ([query-client
     query-key
     query-fn
@@ -110,7 +115,11 @@
          obs (new rq/QueryObserver
                   query-client
                   (clj->js {:queryKey query-key
-                            :queryFn query-fn}))
+                            :queryFn query-fn
+
+                            ;; do not cache results - always
+                            ;; wait for the query fn
+                            :cacheTime 0}))
 
          unsubscribe-a (atom nil)]
 
@@ -126,7 +135,7 @@
                      is-success? (oget rq-status "isSuccess")
                      is-error? (oget rq-status "isError")]
 
-                 ;; (log/debug ::observe-query-subscription
+                 ;; (log/trace ::observe-query-subscription
                  ;;            {:is-loading? is-loading?
                  ;;             :is-success? is-success?
                  ;;             :is-error? is-error?})

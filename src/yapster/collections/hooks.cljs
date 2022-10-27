@@ -4,14 +4,14 @@
    [lambdaisland.glogi :as log]
    [oops.core :refer [oget oset! ocall]]
    [promesa.core :as p]
-   [yapster.app.context :as app.ctx]
+   [yapster.collections :as-alias coll]
    [yapster.collections.keys :as coll.keys]
    [yapster.collections.metadata :as coll.md]
    [yapster.collections.indexes :as coll.idxs]
    [yapster.collections.context :as coll.ctx]
    [yapster.collections.react-context :as coll.react-ctx]
    [yapster.collections.hooks.react-query :as rq]
-   [yapster.collections.hooks.storage-context :as hooks.sc]))
+   [yapster.collections.hooks.index-storage-context :as hooks.isc]))
 
 ;; some notes on the approach:
 ;;
@@ -34,7 +34,8 @@
     obj-or-obj-id]
 
 
-   (let [db-name (useContext coll.react-ctx/storage-context-db-name)
+   (let [{db-name ::coll/db-name
+          :as _rc} (useContext coll.react-ctx/CollectionsContext)
 
          {coll-pk-alias ::coll.md/primary-key
           :as coll} (coll.md/strict-get-collection-metadata coll-name)
@@ -57,7 +58,7 @@
       query-key
 
       (fn [& _args]
-        (hooks.sc/load-collection-object-query
+        (hooks.isc/load-collection-object-query
          db-name
          coll-name
          obj-id))
@@ -70,7 +71,11 @@
 (defn invalidate-collection-index-object
   "invalidate a collection object, causing it to be refetched
    from local store"
-  [query-client _db-name coll-name obj-or-obj-id]
+  [{_db-name ::coll/db-name
+    query-client ::coll/query-client
+    :as _react-ctx}
+   coll-name
+   obj-or-obj-id]
   (let [{coll-pk-alias ::coll.md/primary-key
          :as coll} (coll.md/strict-get-collection-metadata coll-name)
 
@@ -92,12 +97,10 @@
    returns: a partial of invalidate-collection-index-object with
             query-client and db-name filled in"
   []
-  (let [query-client (rq/use-query-client)
-        db-name (useContext coll.react-ctx/storage-context-db-name)]
+  (let [react-ctx (useContext coll.react-ctx/CollectionsContext)]
     (partial
      invalidate-collection-index-object
-     query-client
-     db-name)))
+     react-ctx)))
 
 (defn use-collection-index
   "a hook for infinite-queries on a
@@ -120,46 +123,41 @@
     {limit :limit :as query-opts}]
    (let [coll (coll.md/strict-get-collection-metadata coll-name)
 
-         query-client (rq/use-query-client)
-         auth-info (useContext app.ctx/auth-info)
-         db-name (useContext coll.react-ctx/storage-context-db-name)
+         react-ctx (useContext coll.react-ctx/CollectionsContext)
 
          qkey (rq/index-query-key coll key-alias key-data)
 
          _ (log/info ::use-collection-index
-                     {:coll-name coll-name
+                     {:react-context react-ctx
+
+                      :coll-name coll-name
                       :key-alias key-alias
                       :qkey qkey
                       :key-data key-data
-                      :limit limit
-
-                      :auth-info auth-info
-                      :db-name db-name})
+                      :limit limit})
 
          infq (rq/use-infinite-query
                qkey
 
                (partial
-                hooks.sc/load-collection-page-query
-                query-client
-                auth-info
-                db-name
+                hooks.isc/load-collection-page-query
+                react-ctx
                 coll
                 key-alias
                 key-data
                 query-opts)
 
                {:getNextPageParam
-                 (fn [last-page pages]
-                   (if (not-empty last-page)
-                     #js ["next" last-page pages]
-                     js/undefined))
+                (fn [last-page pages]
+                  (if (not-empty last-page)
+                    #js ["next" last-page pages]
+                    js/undefined))
 
-                 :getPreviousPageParam
-                 (fn [first-page pages]
-                   (if (not-empty first-page)
-                     #js ["previous" first-page pages]
-                     js/undefined))})
+                :getPreviousPageParam
+                (fn [first-page pages]
+                  (if (not-empty first-page)
+                    #js ["previous" first-page pages]
+                    js/undefined))})
 
          ;; the hook fn is called repeatedly - data is up to date
          ;; and can be closed-over in the fetch-start-page / fetch-end-page fns
@@ -209,8 +207,9 @@
    to use the use-invalidate-collection-index-fn hook which returns
    a partial of this fn with the query-client filled in"
 
-  [query-client
-   db-name
+  [{db-name ::coll/db-name
+    query-client ::coll/query-client
+    :as _react-ctx}
    coll-name
    key-alias
    key-data]
@@ -228,11 +227,9 @@
    returns a partial of the invalidate-collection-index fn with
    query-client and db-name filled in"
   []
-  (let [query-client (rq/use-query-client)
-        db-name (useContext coll.react-ctx/storage-context-db-name)]
+  (let [react-ctx (useContext coll.react-ctx/CollectionsContext)]
     (partial invalidate-collection-index
-             query-client
-             db-name)))
+             react-ctx)))
 
 (defn refetch-collection-index-start
   "force a network fetch from the very start of the collection index, update
@@ -246,33 +243,26 @@
    will return a partial fn with the query-client, auth-info and db-name
    values filled in"
 
-  ([query-client
-    auth-info
-    db-name
+  ([react-ctx
     coll-name
     key-alias
     key-data]
    (refetch-collection-index-start
-    query-client
-    auth-info
-    db-name
+    react-ctx
     coll-name
     key-alias
     key-data
     {}))
 
-  ([query-client
-    auth-info
-    db-name
+  ([{db-name ::coll/db-name
+     :as react-ctx}
     coll-name
     key-alias
     key-data
     query-opts]
 
    (log/info ::refetch-collection-index-start
-             {:query-client query-client
-              :auth-info auth-info
-              :db-name db-name
+             {:react-ctx react-ctx
               :coll-name coll-name
               :key-alias key-alias
               :key-data key-data
@@ -288,10 +278,9 @@
                 :coll coll
                 :query-key query-key})
 
-     (hooks.sc/load-refetch-start-collection-page
-      query-client
+     (hooks.isc/load-refetch-start-collection-page
+      react-ctx
       query-key
-      auth-info
       ctx
       coll
       key-alias
@@ -302,17 +291,13 @@
   "a hook returning a function to force network refetching
    of the start of a collection"
   []
-  (let [query-client (rq/use-query-client)
-        auth-info (useContext app.ctx/auth-info)
-        db-name (useContext coll.react-ctx/storage-context-db-name)]
+  (let [react-ctx (useContext coll.react-ctx/CollectionsContext)]
     (partial refetch-collection-index-start
-             query-client
-             auth-info
-             db-name)))
+             react-ctx)))
 
 (defn update-object-and-indexes
-  [query-client
-   db-name
+  [{db-name ::coll/db-name
+    :as react-ctx}
    coll-name
    obj]
   (p/let [ctx (coll.ctx/open-storage-context db-name)
@@ -322,16 +307,14 @@
           _ (coll.idxs/update-object-and-indexes ctx coll-name obj)]
 
     (invalidate-collection-index-object
-     query-client
-     db-name
+     react-ctx
      coll-name
      obj)
 
     (doseq [ka index-key-aliases]
       (let [key-data (coll.keys/extract-key coll ka obj)]
         (invalidate-collection-index
-         query-client
-         db-name
+         react-ctx
          coll-name
          ka
          key-data)))
@@ -340,8 +323,6 @@
 
 (defn use-update-object-and-indexes-fn
   []
-  (let [query-client (rq/use-query-client)
-        db-name (useContext coll.react-ctx/storage-context-db-name)]
+  (let [react-ctx (useContext coll.react-ctx/CollectionsContext)]
     (partial update-object-and-indexes
-             query-client
-             db-name)))
+             react-ctx)))

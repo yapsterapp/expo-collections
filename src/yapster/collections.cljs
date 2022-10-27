@@ -9,8 +9,6 @@
    [yapster.collections.objects]
    [yapster.collections.indexes]
    [yapster.collections.hooks :as hooks]
-   [yapster.collections.hooks.fetch]
-   [yapster.collections.hooks.storage-context]
 
    [yapster.collections.keys-test]
    [yapster.collections.indexes-test]))
