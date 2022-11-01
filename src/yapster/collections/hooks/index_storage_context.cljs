@@ -67,24 +67,15 @@
     limit :limit
     after-key :after
     before-key :before
-    start-key :start
+    _start-key :start
     stale-threshold-s :stale-threshold-s
     thrash-threshold-s :thrash-threshold-s
     :as query-opts
-    :or {limit 10
-         stale-threshold-s (* 12 3600)
+    :or {stale-threshold-s (* 24 3600)
          thrash-threshold-s 600}}
    fetch-page-fn]
 
-  (p/let [start? (some? start-key)
-
-          ;; query an extra record for the overlap
-          ;; if it's not a start page
-          query-opts (assoc query-opts
-                            :limit
-                            (if start? limit (inc limit)))
-
-          {idx-objs :yapster.collections/index-objects
+  (p/let [{r-idx-objs :yapster.collections/index-objects
            idx-objs-updated-at :yapster.collections.index-objects/updated-at
            :as _idx-objs-page} (coll.idxs/get-index-objects-page
                                 ctx
@@ -100,7 +91,7 @@
                       (=
                        (keys/extract-key keyspec obj)
                        remove-key))
-                    idx-objs)
+                    r-idx-objs)
 
           ;; _ (log/info ::load-collection-page-idx-objects {})
 
@@ -117,7 +108,9 @@
           refetch-safe? (or (nil? idx-objs-updated-at)
                             (< idx-objs-updated-at refetch-threshold-t))
 
-          short? (< (count idx-objs) limit)
+          ;; we compare to the retrieved list, before filterin overlap
+          short? (< (count r-idx-objs)
+                    limit)
 
           ;; refresh if forced,
           ;; or the page is stale,
@@ -126,14 +119,28 @@
                     force-refetch?
                     (and refetch-safe?
                          (or
-                          stale?
+
+                          ;; TODO stale? is currently broken,
+                          ;; because some of our APIs
+                          ;; ignore the page-size param, meaning that API
+                          ;; requests are returning short, meaning that the
+                          ;; end-of-page records never get updated, and
+                          ;; idx-objs-updated-at does not change, causing
+                          ;; API spamming. this isn't awful, because
+                          ;; stale? isn't that important anymore - UI
+                          ;; scrolling forces API refreshes when the
+                          ;; ends of the list are hit
+
+                          ;;
+                          ;; stale?
                           short?)))]
 
     (log/trace ::load-maybe-refetch-collection-page*
                {:coll-name coll-name
                 :key-alias key-alias
                 :query-opts query-opts
-                :count-idx-objs (count idx-objs)
+                :retrieved-count (count r-idx-objs)
+                :filtered-count (count idx-objs)
                 :now now
                 :idx-objs-updated-at idx-objs-updated-at
                 :refetch-threshold-t refetch-threshold-t
@@ -171,14 +178,12 @@
     :as coll}
    key-alias
    key-data
-   {_limit :limit
+   {rq-limit :limit
+    :or {rq-limit 10}
     :as query-opts}]
-  (let [keyspec (keys/get-keyspec coll key-alias)
-        query-opts (if (keys/end-key? keyspec key-data)
-                     (assoc query-opts
-                            :start key-data)
-                     (assoc query-opts
-                            :after key-data))
+  (let [query-opts (assoc query-opts
+                          :limit rq-limit
+                          :start key-data)
 
         fetch-page-fn (fn []
                         (hooks.index-api/observe-fetch-start-collection-page
@@ -213,19 +218,13 @@
     :as coll}
    key-alias
    key-data
-   {limit :limit
-    :or {limit 10}
+   {rq-limit :limit
+    :or {rq-limit 10}
     :as query-opts}]
-  (let [keyspec (keys/get-keyspec coll key-alias)
-        query-opts (assoc query-opts
-                          :limit limit
-                          ::force-refetch? true)
-
-        query-opts (if (keys/end-key? keyspec key-data)
-                     (assoc query-opts
-                            :start key-data)
-                     (assoc query-opts
-                            :after key-data))
+  (let [query-opts (assoc query-opts
+                          :limit rq-limit
+                          ::force-refetch? true
+                          :start key-data)
 
         fetch-page-fn (fn []
                         (hooks.index-api/observe-fetch-start-collection-page
@@ -258,7 +257,8 @@
     :as coll}
    key-alias
    key-data
-   {_limit :limit
+   {rq-limit :limit
+    :or {rq-limit 10}
     :as query-opts}
    last-record]
 
@@ -272,6 +272,8 @@
           key-value (keys/extract-key keyspec last-record)
           query-opts (assoc
                       query-opts
+                      ;; inc limit to account for overlap record
+                      :limit (inc rq-limit)
                       :after key-value)
 
           fetch-page-fn (fn []
@@ -307,13 +309,16 @@
     :as coll}
    key-alias
    key-data
-   {_limit :limit
+   {rq-limit :limit
+    :or {rq-limit 10}
     :as query-opts}
    first-record]
   (let [keyspec (keys/get-keyspec coll key-alias)
         key-value (keys/extract-key keyspec first-record)
         query-opts (assoc
                     query-opts
+                    ;; inc limit to account for overlap record
+                    :limit (inc rq-limit)
                     :before key-value)
 
         fetch-page-fn (fn []
@@ -353,8 +358,7 @@
     :as _coll}
    key-alias
    key-data
-   {limit :limit
-    :as query-opts}
+   query-opts
 
    qfn-ctx]
 
@@ -375,7 +379,7 @@
           log-info {:coll-name coll-name
                     :key-alias key-alias
                     :key-data key-data
-                    :limit limit
+                    :query-opts query-opts
                     :query-key query-key
                     :page-dir page-dir
                     :current-page-count (count current-page)

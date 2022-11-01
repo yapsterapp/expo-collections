@@ -74,6 +74,17 @@
         (map objects/extract-data)
         (clj->js))))
 
+(defn get-index-objects-storage-page
+  "get a page of collection objects in their storage format"
+  [ctx
+   coll-name
+   key-alias
+   {_after :after _before :before _limit :limit :as opts}]
+  (p/let [coll (ctx/open-collection ctx coll-name)
+          get-cb (ctx.mm/-get-index-objects-page-cb ctx coll key-alias opts)]
+
+    (tx/readonly-transaction ctx get-cb)))
+
 (defn get-index-objects-page
   "get a page of collection objects referenced from an index
 
@@ -86,14 +97,12 @@
    coll-name
    key-alias
    {_after :after _before :before _limit :limit :as opts}]
-  (p/let [coll (ctx/open-collection ctx coll-name)
-          get-cb (ctx.mm/-get-index-objects-page-cb ctx coll key-alias opts)
-          tx-cb (tx/fmap-tx-callback
-                 get-cb
-                 (comp
-                  extract-index-objects-data
-                  extract-index-objects-metadata))]
-    (tx/readonly-transaction ctx tx-cb)))
+  (p/let [storage-page (get-index-objects-storage-page
+                        ctx coll-name key-alias opts)]
+
+    (-> storage-page
+        (extract-index-objects-metadata)
+        (extract-index-objects-data))))
 
 (defn index-record-key-extractor
   "makes a key-extractor fn to extract the index-key
@@ -171,15 +180,18 @@
               compare
               (comp - compare))
 
-        ;; list of key-objects sorted by last key component
+        ;; list of new-object-records sorted by last key component
         sort-k-objs (->> new-object-records
                     (map (fn [obj] {::key (last (keys/extract-key keyspec obj))
                                    ::obj obj}))
                     (sort-by ::key cmp))
 
+        first-obj-key (-> sort-k-objs first ::key)
+        last-obj-key (-> sort-k-objs last ::key)
+
         ;; _ (prn "sort-k-objs" sort-k-objs)
 
-        ;; list of key-index-records sorted by last key component
+        ;; list of old-index-records sorted by last key component
         idx-kex (index-record-key-extractor keyspec)
         sort-k-idxs (->> old-index-records
                     (map (fn [idxr] {::key (last (idx-kex idxr))
@@ -199,11 +211,12 @@
 
         ;; we only consider overlaps of the old-index-records and
         ;; new-object records for change processing.
-        ;; we want everything between the first and last ::obj record
+        ;; we want everything with a key in the range of the
+        ;; keys of the first and last ::obj record
         overlap (->> merge-obj-idxs
-                     (drop-while #(nil? (::obj %)))
+                     (drop-while #(< (cmp (::key %) first-obj-key) 0))
                      (reverse)
-                     (drop-while #(nil? (::obj %)))
+                     (drop-while #(> (cmp (::key %) last-obj-key) 0))
                      (reverse))
 
         ;; _ (prn "overlap" overlap)
