@@ -1,6 +1,7 @@
 (ns yapster.collections.context.sqlite.tables
   (:require
    [clojure.string :as string]
+   [lambdaisland.glogi :as log]
    [promesa.core :as p]
    [yapster.collections.metadata.key-component :as-alias coll.md.kc]
    [yapster.collections.metadata.key-component.sort-order :as-alias coll.md.kc.so]
@@ -125,6 +126,8 @@
       pk-cols-list
       ","
       key-cols-list ", "
+      "prev_id, "
+      "next_id, "
       "created_at, "
       "updated_at "
       ", PRIMARY KEY ("
@@ -175,6 +178,10 @@
           _qrs (tx.stmts/readwrite-statements
                ctx
                queries)]
+    (log/info
+     ::create-collection
+     {:queries queries})
+
     true))
 
 (defn drop-collection
@@ -184,6 +191,11 @@
           _qrs (tx.stmts/readwrite-statements
                ctx
                queries)]
+
+    (log/info
+     ::drop-collection
+     {:queries queries})
+
     true))
 
 (defmethod context.mm/-create-collection :yapster.collections.context/sqlite

@@ -2,6 +2,7 @@
   (:require
    [clojure.string :as string]
    [lambdaisland.glogi :as log]
+   [oops.core :refer [oget]]
    [yapster.collections.metadata.key-component.sort-order :as-alias coll.md.kc.so]
    [yapster.collections.keys :as coll.keys]
    [yapster.collections.context.transactions :as tx]
@@ -101,87 +102,13 @@
 
     true))
 
-(defn get-index-page-query
-  "for :after queries
-     SELECT * FROM <index-table> WHERE k >= <after> ORDER BY k ASC LIMIT <lim>
-
-   for :before queries
-     SELECT * FROM <index-table> WHERE k ><= <before> ORDER BY k DESC LIMIT <lim>
-  "
-  [{coll-name :yapster.collections.metadata/name
-    :as coll}
-   key-alias
-   {start :start
-    after :after
-    before :before
-    limit :limit
-    :or {limit 10}
-    :as opts}]
-
-  (log/debug ::get-index-page-query
-             {:coll-name coll-name
-              :key-alias key-alias
-              :opts opts})
-
-  (let [key-spec (coll.keys/get-keyspec coll key-alias)
-        _ (check-key-value key-spec opts)
-
-        index-table-name (sqlite.tables/collection-index-table-name
-                          coll-name
-                          key-spec)
-
-        idx-key-fields (sql/idx-key-fields key-spec)
-        order-key-field (last idx-key-fields)
-        order-key-component-spec (last key-spec)
-        order-dir-key-col (sql/key-col-dir
-                           order-key-field
-                           order-key-component-spec)
-
-        sort-order (coll.keys/key-component-sort-order
-                    order-key-component-spec)
-        after? (some? after)
-
-        key-op (condp = [after? sort-order]
-                 [true ::coll.md.kc.so/asc] ">="
-                 [true ::coll.md.kc.so/desc] "<="
-                 [false ::coll.md.kc.so/asc] "<="
-                 [false ::coll.md.kc.so/desc] ">=")
-
-        key-value (or start after before)
-
-        key-conditions (index-page-key-conditions
-                        key-spec
-                        key-op
-                        key-value)]
-
-    [(str
-      "SELECT * FROM "
-      index-table-name
-      " WHERE "
-      key-conditions
-      " ORDER BY " (name order-dir-key-col) " "
-      " LIMIT ?" )
-     (-> []
-         (into key-value)
-         (conj limit)
-         (sql/compatible-query-values))]))
-
-(defn get-index-page-cb
-  [_ctx coll key-alias opts]
-  (let [q (get-index-page-query coll key-alias opts)]
-    (tx.stmts/tx-statement-cb q)))
-
-(defmethod ctx.mm/-get-index-page-cb :yapster.collections.context/sqlite
-  [ctx coll key-alias opts]
-  (get-index-page-cb ctx coll key-alias opts))
-
 (defn get-index-objects-page-query
   "get a page of collection objects referenced from an index-page
 
-   the result rows will have the same fields as objects, *but* the
+   the result rows will have all the fields of objects (*but* the
    updated_at field will be the earlier of the object/updated_at and
-   index/updated_at field - so that freshness calculations consider
-   both index and object"
+   index/updated_at field), along with the key fields from indexes
+   and the prev_id and next_id from indexes"
   [{coll-name :yapster.collections.metadata/name
     coll-pk-alias :yapster.collections.metadata/primary-key
     :as coll}
@@ -227,6 +154,10 @@
                             order-key-field
                             order-key-component-spec)
 
+        idx-table-cols-list (->> (for [f (into idx-key-fields [:prev_id :next_id])]
+                                   (str "idx." (name f) " as " (name f)))
+                                 (string/join ", "))
+
         sort-order (coll.keys/key-component-sort-order
                     order-key-component-spec)
         after? (some? after)
@@ -246,9 +177,10 @@
                         key-value)]
     [(str
       "SELECT "
-      objects-table-cols-list
-      ", min(datetime(objs.updated_at),datetime(idx.updated_at)) as updated_at "
-      " FROM "
+      objects-table-cols-list ", "
+      "min(datetime(objs.updated_at),datetime(idx.updated_at)) as updated_at, "
+      idx-table-cols-list " "
+      "FROM "
       index-table-name " idx "
       "INNER JOIN "
       objects-table-name " objs "
@@ -279,11 +211,25 @@
   [ctx coll key-alias opts]
   (get-index-objects-page-cb ctx coll key-alias opts))
 
-(defn store-index-records-query
+(defn matches-prev-next-id?
+  [prev-id? next-id?]
+  (fn [r]
+    (= [prev-id? next-id?]
+       [(some? (oget r "?prev_id"))
+        (some? (oget r "?next_id"))])))
+
+(defn store-index-records-queries
   "INSERT INTO <table>
-   (<id-col>+,<key-col>+,created_at,updated_at)
+   (<id-col>+,<key-col>+,prev_id,next_id,created_at,updated_at)
    VALUES
-   (?,?,...),(?,?,...),..."
+   (?,?,...),(?,?,...),...
+
+
+   NB: multiple queries are issued, depending on the presence of
+     :prev_id and :next_id fields on records. missing fields will
+     *not* be updated, so will retain their previous value (so that
+     records at the beginning or end of a page will retain their
+     linkage outside the page)"
   [{coll-name :yapster.collections.metadata/name
     coll-pk-alias :yapster.collections.metadata/primary-key
     :as coll}
@@ -305,41 +251,181 @@
         idx-key-fields (sql/idx-key-fields key-spec)
         idx-key-cols-list (sql/idx-key-cols-list key-spec)
 
-        values (->> index-records
-                    (map
-                     (fn [r]
-                       (into
-                        []
-                        (concat
-                          (coll.keys/extract-key pk-fields r)
-                          (coll.keys/extract-key idx-key-fields r))))))]
+        ;; general idea is we do 4 update queries, one for each of the
+        ;; different combinations of prev_id/next_id field presences
+
+        ;; values for records with neither prev_id nor next_id fields
+        no-prev-next-id-values (->> index-records
+                                    (filter (matches-prev-next-id? false false ))
+                                    (map
+                                     (fn [r]
+                                       (into
+                                        []
+                                        (concat
+                                         (coll.keys/extract-key pk-fields r)
+                                         (coll.keys/extract-key idx-key-fields r))))))
+
+        ;; values for records with both a prev_id and next_id fields
+        prev-next-id-values (->> index-records
+                                 (filter (matches-prev-next-id? true true))
+                                 (map
+                                  (fn [r]
+                                    (into
+                                     []
+                                     (concat
+                                      (coll.keys/extract-key pk-fields r)
+                                      (coll.keys/extract-key idx-key-fields r)
+                                      [(oget r "prev_id")
+                                       (oget r "next_id")])))))
+
+        ;; values for records with only a next_id field
+        next-id-values (->> index-records
+                            (filter (matches-prev-next-id? false true))
+                            (map
+                             (fn [r]
+                               (into
+                                []
+                                (concat
+                                 (coll.keys/extract-key pk-fields r)
+                                 (coll.keys/extract-key idx-key-fields r)
+                                 [(oget r "next_id")])))))
+
+        ;; values for records with only a prev_id field
+        prev-id-values (->> index-records
+                            (filter (matches-prev-next-id? true false))
+                            (map
+                             (fn [r]
+                               (into
+                                []
+                                (concat
+                                 (coll.keys/extract-key pk-fields r)
+                                 (coll.keys/extract-key idx-key-fields r)
+                                 [(oget r "prev_id")])))))]
 
     ;; (log/debug ::store-index-records-query {:index-records index-records
     ;;                                        :values values})
 
-    [(str
-      "INSERT INTO " table-name
-      "("
-      pk-cols-list ","
-      idx-key-cols-list ","
-      "created_at,updated_at"
-      ")"
-      " VALUES "
-      (sql/VALUES-templated-placeholders-list
-       (into (vec (repeat (+ (count coll-pk-spec) (count key-spec)) :?))
-             ["datetime()" "datetime()"])
-       (count index-records)) " "
-      "ON CONFLICT (" pk-cols-list ") "
-      "DO UPDATE SET "
-      (->> (for [idxk idx-key-fields]
-             (let [idxk (name idxk)]
-               (str idxk "=excluded." idxk)))
-           (string/join ","))
-      ", updated_at=excluded.updated_at")
+    (filterv
+     some?
 
-     (-> values
-         (flatten)
-         (sql/compatible-query-values))]))
+     [;; query updating neither :prev_id nor :next_id pointers
+      (when (not-empty no-prev-next-id-values)
+        [(str
+          "INSERT INTO " table-name
+          "("
+          pk-cols-list ","
+          idx-key-cols-list ","
+          "created_at,updated_at"
+          ")"
+          " VALUES "
+          (sql/VALUES-templated-placeholders-list
+           (into (vec (repeat (+ (count coll-pk-spec)
+                                 (count key-spec)) :?))
+                 ["datetime()" "datetime()"])
+           (count index-records)) " "
+          "ON CONFLICT (" pk-cols-list ") "
+          "DO UPDATE SET "
+          (->> (for [idxk idx-key-fields]
+                 (let [idxk (name idxk)]
+                   (str idxk "=excluded." idxk)))
+               (string/join ","))
+          ",updated_at=excluded.updated_at")
+
+         (-> no-prev-next-id-values
+             (flatten)
+             (sql/compatible-query-values))])
+
+      ;; query updating both :prev_id and :next_id pointers
+      (when (not-empty prev-next-id-values)
+        [(str
+          "INSERT INTO " table-name
+          "("
+          pk-cols-list ","
+          idx-key-cols-list ","
+          "prev_id,next_id,"
+          "created_at,updated_at"
+          ")"
+          " VALUES "
+          (sql/VALUES-templated-placeholders-list
+           (into (vec (repeat (+ (count coll-pk-spec)
+                                 (count key-spec)
+                                 2) :?))
+                 ["datetime()" "datetime()"])
+           (count index-records)) " "
+          "ON CONFLICT (" pk-cols-list ") "
+          "DO UPDATE SET "
+          (->> (for [idxk idx-key-fields]
+                 (let [idxk (name idxk)]
+                   (str idxk "=excluded." idxk)))
+               (string/join ","))
+          ",prev_id=excluded.prev_id,"
+          "next_id=excluded.next_id,"
+          "updated_at=excluded.updated_at")
+
+         (-> prev-next-id-values
+             (flatten)
+             (sql/compatible-query-values))])
+
+      ;; query updating records with only :prev_id pointers
+      (when (not-empty prev-id-values)
+        [(str
+          "INSERT INTO " table-name
+          "("
+          pk-cols-list ","
+          idx-key-cols-list ","
+          "prev_id,"
+          "created_at,updated_at"
+          ")"
+          " VALUES "
+          (sql/VALUES-templated-placeholders-list
+           (into (vec (repeat (+ (count coll-pk-spec)
+                                 (count key-spec)
+                                 1) :?))
+                 ["datetime()" "datetime()"])
+           (count index-records)) " "
+          "ON CONFLICT (" pk-cols-list ") "
+          "DO UPDATE SET "
+          (->> (for [idxk idx-key-fields]
+                 (let [idxk (name idxk)]
+                   (str idxk "=excluded." idxk)))
+               (string/join ","))
+          ",prev_id=excluded.prev_id,"
+          "updated_at=excluded.updated_at")
+
+         (-> prev-id-values
+             (flatten)
+             (sql/compatible-query-values))])
+
+
+      ;; query updating records with only :next_id pointers
+      (when (not-empty next-id-values)
+        [(str
+          "INSERT INTO " table-name
+          "("
+          pk-cols-list ","
+          idx-key-cols-list ","
+          "next_id,"
+          "created_at,updated_at"
+          ")"
+          " VALUES "
+          (sql/VALUES-templated-placeholders-list
+           (into (vec (repeat (+ (count coll-pk-spec)
+                                 (count key-spec)
+                                 1) :?))
+                 ["datetime()" "datetime()"])
+           (count index-records)) " "
+          "ON CONFLICT (" pk-cols-list ") "
+          "DO UPDATE SET "
+          (->> (for [idxk idx-key-fields]
+                 (let [idxk (name idxk)]
+                   (str idxk "=excluded." idxk)))
+               (string/join ","))
+          ",next_id=excluded.next_id,"
+          "updated_at=excluded.updated_at")
+
+         (-> next-id-values
+             (flatten)
+             (sql/compatible-query-values))])])))
 
 (defn store-index-records-cb
   [_ctx
@@ -347,14 +433,13 @@
    key-alias
    index-records]
   (if (not-empty index-records)
-    (let [q (store-index-records-query coll key-alias index-records)]
-      (tx.stmts/tx-statement-cb q))
+    (let [qs (store-index-records-queries coll key-alias index-records)]
+      (tx.stmts/tx-statements-cb qs))
     tx/noop-tx-callback))
 
 (defmethod ctx.mm/-store-index-records-cb :yapster.collections.context/sqlite
   [ctx coll key-alias index-records]
   (store-index-records-cb ctx coll key-alias index-records))
-
 
 (defn delete-index-records-query
   "DELETE FROM <table>

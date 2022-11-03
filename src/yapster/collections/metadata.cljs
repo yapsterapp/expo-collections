@@ -2,11 +2,65 @@
   (:require
    [clojure.set :as set]
    [malli.experimental :as mx]
-   [yapster.collections.schema :as coll.schema]))
+   [yapster.collections.schema :as coll.schema]
+   [yapster.collections.metadata.key-component :as-alias coll.md.kc]))
 
 ;; global map of
 ;; {<collection-name> <collection-metadata>}
 (defonce collections-a (atom {}))
+
+(defn key-component-extractors
+  "return a map of
+
+   {<key-component-name> [[<extractor> {::key-name <key-name>}]]}
+
+   which will permit checking that no <key-component-name> is
+   associated with conflicting extractors"
+  [{key-specs :yapster.collections.metadata/key-specs
+    :as _coll-md}]
+
+  (reduce
+   (fn [m [kname kspec]]
+     (reduce
+      (fn [m kcspec]
+        (cond
+          (keyword? kcspec)
+          (update m kcspec (fnil conj []) [kcspec
+                                           {::key-name kname}])
+
+          :else
+          (let [[kcname
+                 {extractor ::coll.md.kc/extractor
+                  :as _kcopts}] kcspec]
+            (update m kcname (fnil conj []) [(or extractor kcname)
+                                             {::key-name kname}]))))
+      m
+      kspec))
+   {}
+   key-specs))
+
+(defn check-keyspecs
+  "check that key-components declared with the same name have
+   identical extractors (i.e. represent the same data from the
+   object)"
+  [coll-md]
+
+  (let [kc-extractors (key-component-extractors coll-md)
+
+        check-kc-exs #(<= (->> % (map first) (distinct) (count)) 1)
+
+        kc-errs (->> (reduce
+                      (fn [r [kcname kc-exs]]
+                        (if (check-kc-exs kc-exs)
+                          r
+                          (assoc r kcname kc-exs)))
+                      {}
+                      kc-extractors))]
+
+    (when (not-empty kc-errs)
+      (throw (ex-info
+              "key components with same name *must* have same extractor"
+              kc-errs)))))
 
 (defn check-metadata
   "some high-level checks which are hard to
@@ -21,6 +75,8 @@
 
   (when-not (every? #(contains? key-specs %) index-keys)
     (throw (ex-info "index-keys are not all present in key-specs" coll-md)))
+
+  (check-keyspecs coll-md)
 
   coll-md)
 
