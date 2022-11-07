@@ -37,14 +37,14 @@
 
 (defn normalize-key-component-spec
   "convert a plain :keyword keyspec to
-   [:keyword opts] form"
+   [:key-component-name opts] form"
   [kcspec]
   (if (keyword? kcspec)
     [kcspec {}]
     kcspec))
 
 (defn normalize-keyspec
-  "convert to [[:key-extractor-keyword opts]+] form"
+  "convert to [[:key-component-name opts]+] form"
   [kspec]
   (mapv normalize-key-component-spec kspec ))
 
@@ -116,17 +116,18 @@
          (string/join "__")
          (keyword))))
 
-(defn mapify-key-value
+(defn key-value-map
   "returns a map of a key-value with each component
    keyed by its **denamespaced** key-extractor key-value
 
    this is useful for supplying a key as data for a
    mustache template"
-  [keyspec key-value]
+  [key-value keyspec]
   (let [keyspec (normalize-keyspec keyspec)]
     (into {}
-          (map (fn [[kex _opts] v]
-                 [(denamespace-keyword kex) v])
+          (map (fn [[kcname _opts :as _kcspec]
+                   v]
+                 [kcname v])
                keyspec
                key-value))))
 
@@ -141,17 +142,22 @@
   [kw]
   (let [kwns (some-> kw namespace (string/split "."))
         kwn (name kw)]
-    (conj
-     (or kwns [])
-     kwn)))
+
+    (conj (or kwns []) kwn)))
 
 (defn safe-get-key-component
-  [kex obj]
-  (let [path (kw->path kex)]
+  [[kcname
+    {kc-extractor ::coll.md.kc/extractor
+     :as _kcopts}
+    :as _keycompspec] obj]
+
+  ;; the extractor defaults to the component name
+  (let [kex (or kc-extractor kcname)
+        path (kw->path kex)]
     (reduce
      (fn [r p]
        (if (some? r)
-         (oget+ r p)
+         (oget+ r (str "?" p))
          (reduced nil)))
      obj
      path)))
@@ -162,8 +168,8 @@
 (defn extract-key*
   [keyspec obj]
   (let [keyspec (normalize-keyspec keyspec)
-        ckv (for [[kex _opts] keyspec]
-              (safe-get-key-component kex obj))]
+        ckv (for [kcspec keyspec]
+              (safe-get-key-component kcspec obj))]
     ;; composite keys many not have any nil
     ;; components
     (if (some nil? ckv)

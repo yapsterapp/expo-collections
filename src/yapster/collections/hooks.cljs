@@ -1,6 +1,6 @@
 (ns yapster.collections.hooks
   (:require
-   ["react" :as react :refer [useContext]]
+   ["react" :as react :refer [useContext useEffect]]
    [lambdaisland.glogi :as log]
    [oops.core :refer [oget oset! ocall]]
    [promesa.core :as p]
@@ -102,6 +102,47 @@
      invalidate-collection-index-object
      react-ctx)))
 
+(declare use-refetch-collection-index-start-fn)
+
+(defn use-initialise-collection-index-effect
+  "an effect hook which runs once, on component mount, and forces
+   an update of a collection from the API
+
+   TODO this hook only works when initialised at the start-of-collection
+
+     ... in order to support deep-links we need to change some things,
+     and it's probably something to do *after* work to replace the
+     point-query local-storage with the collections API - because
+     we will want to e.g. use a conversation-id (rather than a
+     last-message-time) in a deep-link, and a viable approach to
+     deep-linking would be ...
+
+     - retrieve the deep-linked record as a point-query
+     - initialise a use-infinite-query with a single page [<deep-linked-record>]
+     - force previous-page and next-page fetches"
+
+  [coll-name key-alias key-data query-opts]
+
+  (log/debug
+   ::use-initialise-collection-index-effect
+   {:coll-name coll-name
+    :key-alias key-alias
+    :key-data key-data
+    :query-opts query-opts})
+
+  (let [refetch-fn (use-refetch-collection-index-start-fn)
+
+        eff-fn (fn []
+                 (refetch-fn coll-name key-alias key-data query-opts)
+                 js/undefined)
+
+        r (useEffect
+           eff-fn
+           ;; empty deps array runs effect only on mount
+           #js [])]
+
+    r))
+
 (defn use-collection-index
   "a hook for infinite-queries on a
    locally persisted collection, based on
@@ -125,16 +166,20 @@
 
          react-ctx (useContext coll.react-ctx/CollectionsContext)
 
+         ;; force an API refresh of the first page
+         _ (use-initialise-collection-index-effect
+            coll-name key-alias key-data query-opts)
+
          qkey (rq/index-query-key coll key-alias key-data)
 
          _ (log/info ::use-collection-index
-                     {:react-context react-ctx
+                     {;; :react-context react-ctx
 
                       :coll-name coll-name
                       :key-alias key-alias
                       :qkey qkey
                       :key-data key-data
-                      :limit limit})
+                      :query-opts query-opts})
 
          infq (rq/use-infinite-query
                qkey
@@ -166,34 +211,39 @@
          fetch-start-page
          (fn [opts]
            ;; "start" is like "previous", but with a forced API fetch
-           (let [page-param #js ["start"
-                                 (->> data-pages
-                                      (filter not-empty)
-                                      (first))
-                                 data-pages]]
-             (log/info
-              ::fetch-start-page
-              {:data-pages-counts (mapv count data-pages)})
-             (ocall
-              infq
-              "fetchPreviousPage"
-              (oset! (or opts #js {}) "!pageParam" page-param))))
+           (let [first-page (->> data-pages
+                                 (filter not-empty)
+                                 (first))
+                 page-param (when (not-empty first-page)
+                              #js ["start" first-page data-pages])]
+
+             (when (some? page-param)
+               (log/info
+                ::fetch-start-page
+                {:data-pages-counts (mapv count data-pages)})
+               (ocall
+                infq
+                "fetchPreviousPage"
+                (oset! (or opts #js {}) "!pageParam" page-param)))))
 
          fetch-end-page
          (fn [opts]
            ;; "end" is like "next", but with a forced API fetch
-           (let [page-param #js ["end"
-                                 (->> data-pages
-                                      (filter not-empty)
-                                      (last))
-                                 data-pages]]
-             (log/info
-              ::fetch-end-page
-              {:data-pages-counts (mapv count data-pages)})
-             (ocall
-              infq
-              "fetchNextPage"
-              (oset! (or opts #js {}) "!pageParam" page-param))))]
+           (let [last-page (->> data-pages
+                                (filter not-empty)
+                                (last))
+                 page-param (when (not-empty last-page)
+                              #js ["end" last-page data-pages])]
+
+             (when (some? page-param)
+               (do
+                 (log/info
+                  ::fetch-end-page
+                  {:data-pages-counts (mapv count data-pages)})
+                 (ocall
+                  infq
+                  "fetchNextPage"
+                  (oset! (or opts #js {}) "!pageParam" page-param))))))]
 
      (-> infq
          (oset! "!fetchStartPage" fetch-start-page)
@@ -262,7 +312,7 @@
     query-opts]
 
    (log/info ::refetch-collection-index-start
-             {:react-ctx react-ctx
+             {;; :react-ctx react-ctx
               :coll-name coll-name
               :key-alias key-alias
               :key-data key-data
@@ -273,10 +323,10 @@
 
            query-key (rq/index-query-key coll key-alias key-data)]
 
-     (log/info ::refetch-collection-index-start-impl
-               {:ctx ctx
-                :coll coll
-                :query-key query-key})
+     ;; (log/info ::refetch-collection-index-start-impl
+     ;;           {:ctx ctx
+     ;;            :coll coll
+     ;;            :query-key query-key})
 
      (hooks.isc/load-refetch-start-collection-page
       react-ctx

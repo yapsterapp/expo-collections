@@ -8,7 +8,9 @@
    dropped and recreated - such as may be required when the
    table format is changed (but the collection value-schemas
    are unchanged)"
-  0)
+  1)
+
+(def CollectionItemKeyComponentExtractor :keyword)
 
 (def CollectionItemKeyComponentOpts
   [:map
@@ -16,7 +18,34 @@
     {:optional true}
     [:or
      [:= :yapster.collections.metadata.key-component.sort-order/asc]
-     [:= :yapster.collections.metadata.key-component.sort-order/desc]]]])
+     [:= :yapster.collections.metadata.key-component.sort-order/desc]]]
+
+   ;; optional extractor. if not present the key-component name
+   ;; keyword will be used as the extractor
+   [:yapster.collections.metadata.key-component/extractor
+    {:optional true}
+    CollectionItemKeyComponentExtractor]])
+
+;; TODO we want names for key components, so
+;; extend this so the keyword is the name of the field,
+;; and is constrained to have no namespace... and if the keyword
+;; is not also the extractor, then have a value extractor
+;; keyword in the opts map
+;; also, add an additional constraint that every key component
+;; in the collection must have *identical* extractors
+
+(defn no-namespace-kw?
+  [v]
+  (and (keyword? v)
+       (nil? (namespace v))))
+
+(def CollectionItemKeyComponentName
+  "a no-namespace keyword, forming the name of the key-component.
+   for a given collection, every reference to a particular named
+   key-component *must* result in the exact same extractor
+   (whether the extractor is the name itself or an explicit
+    extractor) or an error will be thrown at def-collection"
+  [:and :keyword [:fn no-namespace-kw?]])
 
 (def CollectionItemKeyComponentSpec
   "a key component is defined by a keyword and, optionally,
@@ -25,8 +54,8 @@
    through nested maps and the name a field"
   [:or
    :keyword
-   [:tuple :keyword]
-   [:tuple :keyword CollectionItemKeyComponentOpts]])
+   [:tuple CollectionItemKeyComponentName]
+   [:tuple CollectionItemKeyComponentName CollectionItemKeyComponentOpts]])
 
 (def CollectionItemKeySpec
   "defines a multi-component key on a collection. each component

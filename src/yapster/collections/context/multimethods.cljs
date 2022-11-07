@@ -96,16 +96,15 @@
   (fn [ctx _coll _objs]
     (context-impl-dispatch-value ctx)))
 
-(defmulti -get-index-page-cb
-  "get a page of index-records for a collection"
-  (fn [ctx
-      _coll
-      _key-alias
-      {_after :after _before :before _limit :limit :as _opts}]
-    (context-impl-dispatch-value ctx)))
-
 (defmulti -get-index-objects-page-cb
-  "get collection objects referenced from an index-page"
+  "get a page of records with both index and object fields
+
+   it will have:
+   - id_0..id_N : fields from the primary key
+   - k_0..k_N : fields from the index key
+   - - prev_id, next_id : continuity links from the index
+   - updated_at : earliest of index.updated_at and object.updated_at
+   - data : from the object"
   (fn [ctx
       _coll
       _key-alias

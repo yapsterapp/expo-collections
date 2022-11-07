@@ -1,4 +1,4 @@
-(ns yapster.collections.context.util.time
+(ns yapster.collections.util.time
   (:require
    ["date-fns" :refer [parseJSON add]]))
 

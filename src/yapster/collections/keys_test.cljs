@@ -1,7 +1,43 @@
 (ns yapster.collections.keys-test
   (:require
+   [cljs.test :as t :include-macros true :refer [deftest testing is]]
    [yapster.collections.keys :as sut]
-   [cljs.test :as t :include-macros true :refer [deftest testing is]]))
+   [yapster.collections.metadata.key-component :as-alias coll.md.kc]))
+
+(deftest extract-key-test
+  (testing "default extractor"
+    (testing "key present"
+      (is (= [100]
+             (sut/extract-key [:foo] #js {:foo 100})))
+      (is (= [100 200]
+             (sut/extract-key [:foo :bar] #js {:foo 100 :bar 200}))))
+    (testing "key not present"
+      (is (= nil
+             (sut/extract-key [:foo] #js {})))
+      (is (= nil
+             (sut/extract-key [:foo :bar] #js {:foo 100})))))
+
+  (testing "specified extractor"
+    (testing "key present"
+      (is (= [100]
+             (sut/extract-key
+              [[:foo_stuff {::coll.md.kc/extractor :foo}]]
+              #js {:foo 100})))
+      (is (= [100 200]
+             (sut/extract-key
+              [[:foo_stuff {::coll.md.kc/extractor :foo}]
+               [:bar_stuff {::coll.md.kc/extractor :bar}]]
+              #js {:foo 100 :bar 200}))))
+    (testing "key not present"
+      (is (= nil
+             (sut/extract-key
+              [[:foo_stuff {::coll.md.kc/extractor :foo}]]
+              #js {})))
+      (is (= nil
+             (sut/extract-key
+              [[:foo_stuff {::coll.md.kc/extractor :foo}]
+               [:bar_stuff {::coll.md.kc/extractor :bar}]]
+              #js {:foo 100}))))))
 
 (deftest merge-key-sorted-lists-test
   (testing "merges lists"

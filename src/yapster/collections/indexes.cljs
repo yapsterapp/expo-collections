@@ -2,98 +2,152 @@
   "cross-platform support for pages of index records"
   (:require
    [lambdaisland.glogi :as log]
+   [oops.core :refer [oget oset!]]
    [promesa.core :as p]
-   [yapster.collections.context.util.time :as util.t]
    [yapster.collections.metadata.key-component.sort-order :as-alias coll.md.kc.so]
    [yapster.collections.keys :as keys]
-   [yapster.collections.objects :as objects]
    [yapster.collections.context :as ctx]
    [yapster.collections.context.transactions :as tx]
    [yapster.collections.context.multimethods :as ctx.mm]))
 
-(defn extract-index-records-metadata
-  [index-records]
-  (let [;; updated-at is the earliest updated-at
-        ;; of any of the members
-        coll-updated-at (->> index-records
-                             (map #(keys/extract-key [:updated_at] %))
-                             (map first)
-                             (sort)
-                             first)]
-    {:yapster.collections/index-records index-records
-     :yapster.collections.indexes/updated-at
-     (util.t/->inst coll-updated-at)}))
-
 ;; at this level transactions can be used, but no transactions are visible
 ;; in the API
 ;;
-(defn get-index-page
-  "get a page of collection objects referenced from an index
-
-   returns a promise of the objects and the earliest :updated_at timestamp
-   of any of the index-records
-
-   Promise<{:yapster.collections/index-records [<idx-record>*]
-            :yapster.collections.index-records/updated-at <timestamp>}>"
-  [ctx
-   coll-name
-   key-alias
-   {_after :after _before :before _limit :limit :as opts}]
-  (p/let [coll (ctx/open-collection ctx coll-name)
-          get-cb (ctx.mm/-get-index-page-cb ctx coll key-alias opts)
-          tx-cb (tx/fmap-tx-callback
-                 get-cb
-                 extract-index-records-metadata)]
-    (tx/readonly-transaction ctx tx-cb)))
-
-(defn extract-index-objects-metadata
-  "extract update-at metadata from a collection of index-objects"
-  [index-objects]
-  ;; (log/info ::extract-index-objects-metadata {})
-  (let [;; updated-at is the earliest updated-at
-        ;; of any of the members
-        coll-updated-at (->> index-objects
-                             (map #(keys/extract-key [:updated_at] %))
-                             (map first)
-                             (sort)
-                             first)]
-    {:yapster.collections/index-objects index-objects
-     :yapster.collections.index-objects/updated-at
-     (util.t/->inst coll-updated-at)}))
-
-(defn extract-index-objects-data
-  "given a collection of index-objects annotated with updated-at
-   metadata, extract the content objects"
-  [{idx-objs :yapster.collections/index-objects
-    :as objs-with-metadata}]
-  ;; (log/info ::extract-index-objects-data {})
-  (assoc
-   objs-with-metadata
-   :yapster.collections/index-objects
-   (->> idx-objs
-        (map objects/extract-data)
-        (clj->js))))
 
 (defn get-index-objects-page
-  "get a page of collection objects referenced from an index
-
-   returns a promise of the objects and the earliest :updated_at timestamp
-   of any of the objects or index records
-
-   Promise<{:yapster.collections/index-objects [<obj>*]
-            :yapster.collections.index-objects/updated-at <timestamp>}>"
+  "get a page of collection objects in their storage format"
   [ctx
    coll-name
    key-alias
    {_after :after _before :before _limit :limit :as opts}]
   (p/let [coll (ctx/open-collection ctx coll-name)
-          get-cb (ctx.mm/-get-index-objects-page-cb ctx coll key-alias opts)
-          tx-cb (tx/fmap-tx-callback
-                 get-cb
-                 (comp
-                  extract-index-objects-data
-                  extract-index-objects-metadata))]
-    (tx/readonly-transaction ctx tx-cb)))
+          get-cb (ctx.mm/-get-index-objects-page-cb ctx coll key-alias opts)]
+
+    (tx/readonly-transaction ctx get-cb)))
+
+(defn page->annotated-page
+  "given:
+
+  - page: a sequence of <record>s
+
+  return a sequence of <annotated-record>s like:
+
+  {::record <record>
+   ::prev-record <prev-record>?
+   ::next-record <next-record>?}"
+  [page]
+
+  (->> [page
+        (concat [nil] page)
+        (concat (drop 1 page) [nil])]
+       (apply
+        map
+        (fn [record prev-record next-record]
+          {::record record
+           ::prev-record prev-record
+           ::next-record next-record}))))
+
+(defn annotate-page
+  "given:
+
+   - annotated-page: a sequence of <annotated-record>s like:
+       {::record <record>
+        ::prev-record <prev-record>?
+        ::next-record <next-record>?
+        ...}
+
+  - k: a keyword
+  - f: a fn
+
+   return a further annotated sequence of:
+
+   {k (f <annotated-record>)
+    ::record <record>
+    ::prev-record <prev-record>?
+    ::next-record <next-record>?}"
+
+  [k f annotated-page]
+  (for [ann-r annotated-page]
+    (assoc ann-r k (f ann-r))))
+
+(defn make-extract-id-JSON-fn
+  [{coll-pk-alias :yapster.collections.metadata/primary-key
+    :as coll}]
+
+  (let [coll-pk-spec (keys/get-keyspec coll coll-pk-alias)
+        pk-fields (keys/indexed-key-fields :id_ coll-pk-spec)]
+    (fn [r]
+      (some-> (keys/extract-key pk-fields r)
+              (clj->js)
+              (js/JSON.stringify)))))
+
+(defn make-annotate-continuous?
+  "make a fn which, when given an annotated index-object-record,
+   returns
+   - true if all the prev_id and next_id pointers are consistent
+   - false if there are any prev_id and next_id inconsistencies"
+  [coll]
+  (let [extract-id (make-extract-id-JSON-fn coll)]
+
+    (fn annotate-continuous?
+      [{record ::record
+        prev-record ::prev-record
+        next-record ::next-record}]
+
+      ;; (log/info ::annotate-continuous?
+      ;;           {::record record
+      ;;            ::prev-record prev-record
+      ;;            ::next-record next-record})
+
+      (let [record-id (extract-id record)
+            record-prev-id (oget record "?prev_id")
+            record-next-id (oget record "?next_id")
+
+            prev-record-id (some-> prev-record extract-id)
+            prev-record-next-id (some-> prev-record (oget "?next_id"))
+
+            next-record-id (some-> next-record extract-id)
+            next-record-prev-id (some-> next-record (oget "?prev_id"))]
+
+        ;; check all forward and backward links
+        (and
+         (or (nil? prev-record-id)
+             (= record-id prev-record-next-id))
+
+         (or (nil? prev-record-id)
+             (= record-prev-id prev-record-id))
+
+         (or (nil? next-record-id)
+             (= record-next-id next-record-id))
+
+         (or (nil? next-record-id)
+             (= record-id next-record-prev-id)))))))
+
+(defn add-prev-next-id-fields
+  "add :prev_id and :next_id fields to index-records,
+   with values being the JSON encoded id of the previous/next record"
+  [coll
+   index-records]
+
+  (let [extract-id-JSON (make-extract-id-JSON-fn coll)
+
+        ;; [record prev-record next-record]
+        record-prev-next (->> [index-records
+                               (concat [nil] index-records)
+                               (concat (drop 1 index-records) [nil])]
+                              (apply map vector))]
+
+    (->> record-prev-next
+         (map
+          (fn [[r p n]]
+            [r
+             (extract-id-JSON p)
+             (extract-id-JSON n)]))
+         (map
+          (fn [[r p n]]
+            (cond-> r
+              (some? p) (oset! "!prev_id" p)
+              (some? n) (oset! "!next_id" n)))))))
 
 (defn index-record-key-extractor
   "makes a key-extractor fn to extract the index-key
@@ -152,9 +206,7 @@
    old-index-records
    new-object-records]
 
-  ;; TODO
-  ;; need to account for the start-of queries... the process will be ...
-  ;; only calculate changes within the overlap ...
+  ;; we only calculate deletions within the overlap ...
   ;; - all new-object-records are always inserted
   ;; - old-index-records outside the overlap are never deleted
   ;; - from within the overlap, old-index records missing from
@@ -171,15 +223,18 @@
               compare
               (comp - compare))
 
-        ;; list of key-objects sorted by last key component
+        ;; list of new-object-records sorted by last key component
         sort-k-objs (->> new-object-records
                     (map (fn [obj] {::key (last (keys/extract-key keyspec obj))
                                    ::obj obj}))
                     (sort-by ::key cmp))
 
+        first-obj-key (-> sort-k-objs first ::key)
+        last-obj-key (-> sort-k-objs last ::key)
+
         ;; _ (prn "sort-k-objs" sort-k-objs)
 
-        ;; list of key-index-records sorted by last key component
+        ;; list of old-index-records sorted by last key component
         idx-kex (index-record-key-extractor keyspec)
         sort-k-idxs (->> old-index-records
                     (map (fn [idxr] {::key (last (idx-kex idxr))
@@ -197,25 +252,30 @@
 
         ;; _ (prn "merge-obj-idxs" merge-obj-idxs)
 
-        ;; we only consider overlaps of the old-index-records and
-        ;; new-object records for change processing.
-        ;; we want everything between the first and last ::obj record
-        overlap (->> merge-obj-idxs
-                     (drop-while #(nil? (::obj %)))
-                     (reverse)
-                     (drop-while #(nil? (::obj %)))
-                     (reverse))
-
-        ;; _ (prn "overlap" overlap)
-
-        ;; insert a record for each new-object-records
+        ;; insert an index-record for each new-object-records. :prev_id
+        ;; and :next_id values are added to each index record, with
+        ;; the first record getting no :prev_id and the last record
+        ;; getting no :next_id
         insertions (->> merge-obj-idxs
                         (filter (fn [{obj ::obj}] (some? obj)))
                         (map
                          (fn [{obj ::obj}]
-                               (make-index-record coll keyspec obj))))
+                               (make-index-record coll keyspec obj)))
+                        (add-prev-next-id-fields coll))
 
         ;; _ (prn "insertions" insertions)
+
+        ;; we only consider overlaps of the old-index-records and
+        ;; new-object records for change processing.
+        ;; we want everything with a key in the range of the
+        ;; keys of the first and last ::obj record
+        overlap (->> merge-obj-idxs
+                     (drop-while #(< (cmp (::key %) first-obj-key) 0))
+                     (reverse)
+                     (drop-while #(> (cmp (::key %) last-obj-key) 0))
+                     (reverse))
+
+        ;; _ (prn "overlap" overlap)
 
         ;; only delete missing records from overlap
         deletions (->> overlap
@@ -259,21 +319,30 @@
                            old-index-records
                            new-object-records)
 
-          _ (log/info ::update-index-page-changes _idx-chgs )
+          _ (log/debug ::update-index-page-changes _idx-chgs )
 
-          store-objects-cb (ctx.mm/-store-collection-objects-cb
-                            ctx coll new-object-records)
-          insert-cb (ctx.mm/-store-index-records-cb
-                     ctx coll key-alias idx-insertions)
-          delete-cb (ctx.mm/-delete-index-records-cb
-                     ctx coll key-alias idx-deletions)
+          store-objects-cb (when (not-empty new-object-records)
+                             (ctx.mm/-store-collection-objects-cb
+                              ctx coll new-object-records))
+          insert-cb (when (not-empty idx-insertions)
+                      (ctx.mm/-store-index-records-cb
+                       ctx coll key-alias idx-insertions))
+          delete-cb (when (not-empty idx-deletions)
+                      (ctx.mm/-delete-index-records-cb
+                       ctx coll key-alias idx-deletions))
 
-          tx-cb (tx/conj-tx-callbacks
-                 [store-objects-cb
-                  insert-cb
-                  delete-cb])]
+          callbacks (filter
+                     some?
+                     [store-objects-cb
+                      insert-cb
+                      delete-cb])
 
-    (tx/readwrite-transaction ctx tx-cb)))
+          tx-cb (when (not-empty callbacks)
+                  (tx/conj-tx-callbacks callbacks))]
+
+    (if (some? tx-cb)
+      (tx/readwrite-transaction ctx tx-cb)
+      true)))
 
 (defn update-object-and-indexes
   "insert or update a collection object and all its indexes"
