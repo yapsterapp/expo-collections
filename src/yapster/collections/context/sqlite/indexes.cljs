@@ -117,7 +117,7 @@
     after :after
     before :before
     limit :limit
-    :or {limit 10}
+    :or {limit 20}
     :as opts}]
 
   (log/debug ::get-index-objects-page-query

@@ -82,9 +82,9 @@
           annotate-stale? (fn [{r ::coll.idxs/record}]
                             (let [upd-t (util.t/->inst
                                          (oget r "updated_at"))]
-                              ;; (log/trace ::stale?
-                              ;;           {:upd-t upd-t
-                              ;;            :stale-threshold-t stale-threshold-t})
+                              (log/trace ::stale?
+                                        {:upd-t upd-t
+                                         :stale-threshold-t stale-threshold-t})
                               (< upd-t stale-threshold-t)))
 
           r-idx-objs (coll.idxs/get-index-objects-page
@@ -116,60 +116,62 @@
 
           ;; _ (log/info ::load-collection-page-idx-objects {})
 
-          ;; scan through the annotated local records, and look for any
-          ;; stale or discontinuous records
+          ;; is an annotated index record stale or discontinuous?
           requires-refetch? (fn [{stale? ::stale?
                                  continuous? ::continuous?
                                  record ::coll.idxs/record
                                  :as _ann-idx-obj}]
 
                               (cond
-                                (and stale? (not continuous?))
-                                [::stale+discontinuous record]
-
-                                stale?
-                                [::stale record]
 
                                 (not continuous?)
-                                [::discontinuous record]))
+                                [::discontinuous record nil]
+
+                                stale?
+                                [::stale record nil]))
 
           [refetch-reason
-           refetch-from-index-record] (if force-refetch?
+           refetch-from-index-record
+           refetch-from-key] (cond
 
-                                        ;; refetch from the start/end of the page
-                                        [::forced
-                                         (if (some? before-key)
-                                           (last r-idx-objs)
-                                           (first r-idx-objs))]
+                               ;; if forced, duplicate the original fetch
+                               (and force-refetch? (some? start-key))
+                               [::forced nil nil]
 
-                                        ;; refetch from the first stale or
-                                        ;; discontinuous record
-                                        (some requires-refetch?
-                                              (if (some? before-key)
-                                                (reverse ann-idx-objs)
-                                                ann-idx-objs)))
+                               (and force-refetch? (some? before-key))
+                               [::forced (first r-idx-objs) before-key]
+
+                               (and force-refetch? (some? after-key))
+                               [::forced (last r-idx-objs) after-key]
+
+                               ;; refetch from the first stale or
+                               ;; discontinuous record, if any
+                               :else
+                               (some requires-refetch?
+                                     (if (some? before-key)
+                                       (reverse ann-idx-objs)
+                                       ann-idx-objs)))
 
           ;; the annotated records are index-objects, not raw client objects
           refetch-from-record (when (some? refetch-from-index-record)
                                 (coll.objs/extract-data refetch-from-index-record))
 
-          refetch-from-key (when (some? refetch-from-record)
-                             (keys/extract-key keyspec refetch-from-record))
+          ;; use a record to get the key, if we have one... fall back
+          ;; to an after/before key provided to use-collection-index
+          refetch-from-key (if (some? refetch-from-record)
+                             (keys/extract-key keyspec refetch-from-record)
+                             refetch-from-key)
 
-
-          ;; we don't auto-fetch on short results, because
+          ;; we don't refetch when short (i.e. fewer records than requested)...
           ;; that leads to thrashing the API when the remote
-          ;; collection is actually short or empty...
+          ;; collection is really short or empty...
           ;; instead we have a useEffect hook called from
           ;; the use-collection-index hook which forces an
           ;; initial API refresh, and the fetchStartPage
           ;; and fetchEndPage additions to the use-infinite-query
           ;; which also force API refreshes
           ;;
-          refetch? (or
-                    force-refetch?
-
-                    (some? refetch-from-key))]
+          refetch? (some? refetch-reason)]
 
     ;; this is probably the core collections logging ... you can see
     ;; a local page was loaded, and why refetch decisions were made
@@ -185,23 +187,15 @@
                :refetch? refetch?
                :refetch-reason refetch-reason
                ;; :refetch-from-record refetch-from-record
-               :refetch-from-key refetch-from-key})
+               :refetch-from-key refetch-from-key
+               ;; happens with a forced refetch, after or before
+               ;; and no local data - i.e. a deep-link
+               :refetch-from-record-nil? (nil? refetch-from-record)})
 
     (when refetch?
-      (if (some? start-key)
+      (cond
 
-        ;; start refetch fn takes no extra params
-        (refetch-page*
-         react-ctx
-         query-key
-         ctx
-         coll
-         key-alias
-         query-opts
-         idx-objs
-         fetch-page-fn)
-
-        ;; previous/next fns take key-data and first/last record
+        (some? refetch-from-key)
         (refetch-page*
          react-ctx
          query-key
@@ -212,16 +206,32 @@
          idx-objs
          (partial fetch-page-fn
                   refetch-from-key
-                  refetch-from-record)))
+                  refetch-from-record))
+
+        ;; only refetch from the start if forced...
+        (and force-refetch?
+             (some? start-key))
+        (refetch-page*
+         react-ctx
+         query-key
+         ctx
+         coll
+         key-alias
+         query-opts
+         idx-objs
+         ;; start refetch fn takes no extra params
+         fetch-page-fn))
 
       ;; promesa waits on each step in the *body* of a let too...
       ;; but we don't want that here, so 'lose' the refetch-page
       ;; result promise
       true)
 
-    (when (not-empty idx-objs)
-      (clj->js
-       idx-objs))))
+    ;; better to return an empty array than a nil because
+    ;; goog.array/concat seems to treat nils as [nil], which leads
+    ;; to undesired outcomes when pages are concatenated
+    (clj->js
+     idx-objs)))
 
 (defn load-start-collection-page
   [react-ctx
@@ -230,26 +240,42 @@
    {coll-name ::coll.md/name
     :as coll}
    key-alias
-   key-data
+   start-key-data
    {rq-limit :limit
-    :or {rq-limit 10}
+    :or {rq-limit 20}
     :as query-opts}]
   (let [query-opts (assoc query-opts
                           :limit rq-limit
-                          :start key-data)
+                          :start start-key-data)
 
-        fetch-page-fn (fn []
-                        (hooks.index-api/observe-fetch-start-collection-page
-                         react-ctx
-                         coll
-                         key-alias
-                         key-data
-                         query-opts))]
+        fetch-page-fn (fn [key-data last-record]
+                        (if (some? key-data)
+
+                          ;; if we get called with key-data then it's because
+                          ;; we're on a start page, with an API that returns
+                          ;; fewer records than the page, and there are
+                          ;; discontinuities or stale records meaning we need
+                          ;; to refresh from part-way down the page - it's
+                          ;; always a next-page query
+                          (hooks.index-api/observe-fetch-next-collection-page
+                           react-ctx
+                           coll
+                           key-alias
+                           key-data
+                           last-record
+                           query-opts)
+
+                          (hooks.index-api/observe-fetch-start-collection-page
+                           react-ctx
+                           coll
+                           key-alias
+                           start-key-data
+                           query-opts)))]
 
     (log/debug ::load-start-collection-page
                {:coll-name coll-name
                 :key-alias key-alias
-                :key-data key-data
+                :start-key-data start-key-data
                 :query-opts query-opts})
 
     (load-maybe-refetch-collection-page*
@@ -267,40 +293,19 @@
   [react-ctx
    query-key
    ctx
-   {coll-name ::coll.md/name
-    :as coll}
+   coll
    key-alias
-   key-data
-   {rq-limit :limit
-    :or {rq-limit 10}
-    :as query-opts}]
-  (let [query-opts (assoc query-opts
-                          :limit rq-limit
-                          ::force-refetch? true
-                          :start key-data)
+   start-key-data
+   query-opts]
 
-        fetch-page-fn (fn []
-                        (hooks.index-api/observe-fetch-start-collection-page
-                         react-ctx
-                         coll
-                         key-alias
-                         key-data
-                         query-opts))]
-
-    (log/debug ::load-refetch-start-collection-page
-               {:coll-name coll-name
-                :key-alias key-alias
-                :key-data key-data
-                :query-opts query-opts})
-
-    (load-maybe-refetch-collection-page*
-     react-ctx
-     query-key
-     ctx
-     coll
-     key-alias
-     query-opts
-     fetch-page-fn)))
+  (load-start-collection-page
+   react-ctx
+   query-key
+   ctx
+   coll
+   key-alias
+   start-key-data
+   (assoc query-opts ::force-refetch? true)))
 
 (defn load-next-collection-page
   [react-ctx
@@ -312,7 +317,7 @@
    key-data
    _last-record
    {rq-limit :limit
-    :or {rq-limit 10}
+    :or {rq-limit 20}
     :as query-opts}
    ]
 
@@ -363,7 +368,7 @@
    key-data
    _first-record
    {rq-limit :limit
-    :or {rq-limit 10}
+    :or {rq-limit 20}
     :as query-opts}]
   (let [query-opts (assoc
                     query-opts
@@ -415,9 +420,9 @@
   (p/let [ctx (coll.ctx/open-storage-context db-name)
           coll (coll.ctx/open-collection ctx coll-name)
 
-          ;; default the limit to 10
+          ;; default the limit to 20
           query-opts (merge
-                      {:limit 10}
+                      {:limit 20}
                       query-opts)
 
           query-key (oget qfn-ctx "queryKey")

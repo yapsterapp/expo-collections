@@ -66,7 +66,7 @@
             db-exists? (database-exists? db-name)
             _ (when db-exists?
                 (delete-file (db-file-path db-name)))]
-      true)
+      db-exists?)
     nil))
 
 (defn open-database

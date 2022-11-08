@@ -69,11 +69,11 @@
 
     (log/debug ::delete-storage-context db-name)
 
-    (p/let [_ (delete-active-storage-context* db-name)]
+    (p/let [r (delete-active-storage-context* db-name)]
 
       (open-contexts/set-storage-context db-name nil)
 
-      true)))
+      r)))
 
 (defn open-collection*
   [ctx coll-name]

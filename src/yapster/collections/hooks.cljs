@@ -194,15 +194,21 @@
 
                {:getNextPageParam
                 (fn [last-page pages]
-                  (if (not-empty last-page)
-                    #js ["next" last-page pages]
-                    js/undefined))
+                  (let [r (if (not-empty last-page)
+                            #js ["next" last-page pages]
+                            js/undefined)]
+                    ;; (log/debug ::getNextPageParam
+                    ;;            {:r r})
+                    r))
 
                 :getPreviousPageParam
                 (fn [first-page pages]
-                  (if (not-empty first-page)
-                    #js ["previous" first-page pages]
-                    js/undefined))})
+                  (let [r (if (not-empty first-page)
+                            #js ["previous" first-page pages]
+                            js/undefined)]
+                    ;; (log/debug ::getPreviousPageParam
+                    ;;            {:r r})
+                    r))})
 
          ;; the hook fn is called repeatedly - data is up to date
          ;; and can be closed-over in the fetch-start-page / fetch-end-page fns
